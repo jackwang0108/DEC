@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Literal, Optional
 
 # Third-Party Library
+import numpy as np
+import PIL.Image as PIMage
+from skimage.feature import hog
 
 # Torch Library
 import torch
@@ -72,7 +75,7 @@ def get_datasets(
         return MNIST(root=root_dir, download=True, train=split == "train")
 
     elif dataset == "STL-10":
-        # Sec.4.1 Datasets-STL10: We also used the unlabeled set when training our auto-encoders
+        # Sec.4.1 Datasets-STL10: ... We also used the unlabeled set when training our auto-encoders ...
         return STL10(
             root=root_dir,
             download=True,
@@ -83,12 +86,69 @@ def get_datasets(
         return REUTERS(root=root_dir, download=True, split=split)
 
 
+def mnist_collate_fn(
+    batch: list[tuple[PIMage.Image, int]]
+) -> tuple[torch.FloatTensor, torch.LongTensor]:
+    raw_images, raw_labels = zip(*batch)
+
+    images = torch.stack(
+        [
+            torch.tensor(np.array(image), dtype=torch.float32).flatten()
+            for image in raw_images
+        ]
+    )
+    labels = torch.tensor(raw_labels, dtype=torch.int64)
+
+    return images, labels
+
+
+def stl10_collate_fn(
+    batch: list[tuple[PIMage.Image, int]]
+) -> tuple[torch.FloatTensor, torch.LongTensor]:
+    raw_images, raw_labels = zip(*batch)
+
+    image: PIMage.Image
+    image_with_hog = []
+    for image in raw_images:
+
+        # Sec.4.1 Datasets-STL10: ... we concatenated HOG feature and a 8-by-8 color map to use as input to all algorithms ...
+        image = np.array(image.convert("L"))
+        hog_feature = hog(
+            image, pixels_per_cell=(8, 8), cells_per_block=(2, 2), feature_vector=True
+        )
+
+        image_with_hog.append(
+            torch.cat(
+                (
+                    torch.tensor(image, dtype=torch.float32).flatten(),
+                    torch.tensor(hog_feature, dtype=torch.float32),
+                ),
+                dim=0,
+            )
+        )
+
+    images = torch.stack(image_with_hog)
+    labels = torch.tensor(raw_labels, dtype=torch.int64)
+
+    return images, labels
+
+
 if __name__ == "__main__":
+
+    # test on mnist
     mnist = get_datasets("MNIST")
-    print(next(iter(mnist)))
+    dataloader = data.DataLoader(mnist, batch_size=4, collate_fn=mnist_collate_fn)
+    for image, label in dataloader:
+        print(image.shape, label.shape)
+        break
 
+    # test on stl10
     stl10 = get_datasets("STL-10")
-    print(next(iter(stl10)))
+    dataloader = data.DataLoader(stl10, batch_size=4, collate_fn=stl10_collate_fn)
+    for image, label in dataloader:
+        print(image.shape, label.shape)
+        break
 
-    reuters = get_datasets("REUTERS")
-    print(type(reuters))
+    # test on reuters
+    # reuters = get_datasets("REUTERS")
+    # print(type(reuters))
