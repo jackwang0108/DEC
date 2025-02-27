@@ -11,6 +11,7 @@ datasets 定义了数据集的加载和预处理
 import subprocess
 from pathlib import Path
 from typing import Literal, Optional
+from collections.abc import Callable
 
 # Third-Party Library
 import numpy as np
@@ -19,7 +20,9 @@ from skimage.feature import hog
 
 # Torch Library
 import torch
+import torch.nn as nn
 import torch.utils.data as data
+import torchvision.transforms as transforms
 from torchvision.datasets import MNIST, STL10
 
 
@@ -33,6 +36,7 @@ class REUTERS(data.Dataset):
         self,
         root: Path,
         download: Optional[bool] = True,
+        transform: Optional[Callable] = None,
         split: Literal["train", "test"] = "train",
     ):
         if download and not (p := root / "REUTERS").exists():
@@ -41,6 +45,8 @@ class REUTERS(data.Dataset):
         elif not root.exists():
             raise FileNotFoundError(f"Dataset not found at {root}")
 
+        self.split = split
+        self.transform = transform
         raise NotImplementedError("REUTERS dataset not implemented yet")
 
     def __len__(self) -> int:
@@ -71,66 +77,99 @@ def get_datasets(
 ) -> MNIST | STL10 | REUTERS:
     assert dataset in ["MNIST", "STL-10", "REUTERS"], f"dataset {dataset} not supported"
 
+    transform = transforms.Compose([transforms.ToTensor()])
+
     if dataset == "MNIST":
-        return MNIST(root=root_dir, download=True, train=split == "train")
+        return MNIST(
+            root=root_dir, download=True, transform=transform, train=split == "train"
+        )
 
     elif dataset == "STL-10":
         # Sec.4.1 Datasets-STL10: ... We also used the unlabeled set when training our auto-encoders ...
         return STL10(
             root=root_dir,
             download=True,
+            transform=transform,
             split="train+unlabeled" if split == "train" else "test",
         )
 
     elif dataset == "REUTERS":
-        return REUTERS(root=root_dir, download=True, split=split)
+        return REUTERS(root=root_dir, download=True, transform=transform, split=split)
+
+
+# Sec.4.1 Datasets-STL10: ... , we normalize all datasets so that \frac{1}{d}||x_i||_2^2 is approximately 1, ...
+def normalize(image_representation: torch.FloatTensor) -> torch.FloatTensor:
+    return (
+        image_representation
+        / torch.norm(image_representation, keepdim=True)
+        * image_representation.nelement()
+    )
 
 
 def mnist_collate_fn(
-    batch: list[tuple[PIMage.Image, int]]
+    batch: list[tuple[torch.FloatTensor, int]]
 ) -> tuple[torch.FloatTensor, torch.LongTensor]:
     raw_images, raw_labels = zip(*batch)
 
-    images = torch.stack(
-        [
-            torch.tensor(np.array(image), dtype=torch.float32).flatten()
-            for image in raw_images
-        ]
-    )
+    images = torch.stack([normalize(image.flatten()) for image in raw_images])
     labels = torch.tensor(raw_labels, dtype=torch.int64)
 
     return images, labels
+
+
+def calculate_hog_feature(
+    image: torch.FloatTensor,
+    pixel_per_cell: tuple[int, int] = (8, 8),
+    cell_per_block: tuple[int, int] = (1, 1),
+    orientations: int = 6,
+) -> torch.FloatTensor:
+    gray_image = transforms.Grayscale()(image).squeeze().numpy()
+    hog_feature = hog(
+        gray_image,
+        pixels_per_cell=pixel_per_cell,
+        cells_per_block=cell_per_block,
+        orientations=orientations,
+        feature_vector=True,
+    )
+    return torch.tensor(hog_feature, dtype=image.dtype)
+
+
+def calculate_color_histogram(
+    image: torch.FloatTensor, bins=(8, 8, 8)
+) -> torch.FloatTensor:
+    hist: np.ndarray
+    hist = np.histogramdd(
+        image.permute(1, 2, 0).reshape(-1, 3),
+        bins=bins,
+        range=[(0, 256), (0, 256), (0, 256)],
+    )[0]
+    hist /= hist.sum()
+    return torch.tensor(hist.flatten(), dtype=image.dtype)
 
 
 def stl10_collate_fn(
-    batch: list[tuple[PIMage.Image, int]]
+    batch: list[tuple[torch.FloatTensor, int]]
 ) -> tuple[torch.FloatTensor, torch.LongTensor]:
-    raw_images, raw_labels = zip(*batch)
+    images, raw_labels = zip(*batch)
 
-    image: PIMage.Image
-    image_with_hog = []
-    for image in raw_images:
+    images: torch.FloatTensor
+
+    image_representations: list[torch.FloatTensor] = []
+
+    for image in images:
+
+        hog_feature = calculate_hog_feature(image)
+        color_histogram = calculate_color_histogram(image)
 
         # Sec.4.1 Datasets-STL10: ... we concatenated HOG feature and a 8-by-8 color map to use as input to all algorithms ...
-        image = np.array(image.convert("L"))
-        hog_feature = hog(
-            image, pixels_per_cell=(8, 8), cells_per_block=(2, 2), feature_vector=True
+        image_representations.append(
+            normalize(torch.cat([hog_feature, color_histogram]))
         )
 
-        image_with_hog.append(
-            torch.cat(
-                (
-                    torch.tensor(image, dtype=torch.float32).flatten(),
-                    torch.tensor(hog_feature, dtype=torch.float32),
-                ),
-                dim=0,
-            )
-        )
-
-    images = torch.stack(image_with_hog)
+    image_representations = torch.stack(image_representations)
     labels = torch.tensor(raw_labels, dtype=torch.int64)
 
-    return images, labels
+    return image_representations, labels
 
 
 def reuters_collate_fn(
@@ -141,11 +180,15 @@ def reuters_collate_fn(
 
 if __name__ == "__main__":
 
+    label: torch.LongTensor
+    image: torch.FloatTensor
+
     # test on mnist
     mnist = get_datasets("MNIST")
     dataloader = data.DataLoader(mnist, batch_size=4, collate_fn=mnist_collate_fn)
     for image, label in dataloader:
         print(image.shape, label.shape)
+        print(image.norm(p=2, dim=1))
         break
 
     # test on stl10
@@ -153,6 +196,7 @@ if __name__ == "__main__":
     dataloader = data.DataLoader(stl10, batch_size=4, collate_fn=stl10_collate_fn)
     for image, label in dataloader:
         print(image.shape, label.shape)
+        print(image.norm(p=2, dim=1))
         break
 
     # test on reuters
