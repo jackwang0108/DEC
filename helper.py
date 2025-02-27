@@ -42,6 +42,12 @@ def get_args() -> argparse.Namespace:
         help="The batch size for training",
     )
     parser.add_argument(
+        "--num_epoch",
+        type=int,
+        default=200,
+        help="The number of epochs to train",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=666,
