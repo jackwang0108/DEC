@@ -1,5 +1,7 @@
 {
     "cSpell.words": [
+        "histogramdd",
         "skimage"
-    ]
+    ],
+    "debugpy.showPythonInlineValues": false
 }
