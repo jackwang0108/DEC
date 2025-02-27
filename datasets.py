@@ -133,6 +133,12 @@ def stl10_collate_fn(
     return images, labels
 
 
+def reuters_collate_fn(
+    batch: list[tuple[PIMage.Image, int]]
+) -> tuple[torch.FloatTensor, torch.LongTensor]:
+    raise NotImplementedError("REUTERS dataset not implemented yet")
+
+
 if __name__ == "__main__":
 
     # test on mnist
