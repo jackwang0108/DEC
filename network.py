@@ -24,7 +24,7 @@ class DEC(nn.Module):
         super(DEC, self).__init__()
 
         self.auto_encoders = nn.ModuleDict()
-        self.non_linear_mapping = nn.Sequential()
+        self.non_linear_mapping = nn.Sequential(nn.Identity())
 
     def add_layer(
         self,
@@ -55,7 +55,7 @@ class DEC(nn.Module):
             f"encoder_{len(self.non_linear_mapping)}", encoder
         )
         self.auto_encoders.add_module(
-            name=f"autoencoder {len(self.auto_encoders)}",
+            name=f"autoencoder {len(self.auto_encoders) + 1}",
             module=nn.Sequential(encoder, decoder),
         )
 
