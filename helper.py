@@ -53,6 +53,24 @@ def get_args() -> argparse.Namespace:
         default=666,
         help="The random seed for reproducibility",
     )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=1.0,
+        help="degrees of freedom of the Student’s t- distribution",
+    )
+    parser.add_argument(
+        "--num_clusters",
+        type=int,
+        default=10,
+        help="The number of clusters to use",
+    )
+    parser.add_argument(
+        "--total",
+        type=float,
+        default=0.001,
+        help="The threshold of stopping optimization",
+    )
     return parser.parse_args()
 
 
@@ -88,6 +106,15 @@ def get_freer_gpu():
     os.system("nvidia-smi -q -d Memory |grep -A4 GPU | grep Used >tmp")
     memory_available = [int(x.split()[2]) for x in open("tmp", "r").readlines()]
     return np.argmin(memory_available)
+
+
+def calculate_accuracy(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+) -> float:
+    assert len(y_true) == len(y_pred)
+    correct = (y_true == y_pred).sum().item()
+    return correct / len(y_true)
 
 
 if __name__ == "__main__":

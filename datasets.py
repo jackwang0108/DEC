@@ -23,12 +23,29 @@ import torch
 import torch.nn as nn
 import torch.utils.data as data
 import torchvision.transforms as transforms
-from torchvision.datasets import MNIST, STL10
+from torchvision.datasets import STL10 as TorchSTL10
+from torchvision.datasets import MNIST as TorchMNIST
 
 
 # My Library
 
 # TODO: 写完REUTERS数据集
+
+
+class MNIST(TorchMNIST):
+    def __init__(self, *args, **kwargs):
+        super(MNIST, self).__init__(*args, **kwargs)
+
+    def __getitem__(self, idx: int) -> tuple[int, torch.FloatTensor, int]:
+        return idx, *super(MNIST, self).__getitem__(idx)
+
+
+class STL10(TorchSTL10):
+    def __init__(self, *args, **kwargs):
+        super(STL10, self).__init__(*args, **kwargs)
+
+    def __getitem__(self, idx: int) -> tuple[int, torch.FloatTensor, int]:
+        return idx, *super(STL10, self).__getitem__(idx)
 
 
 class REUTERS(data.Dataset):
@@ -107,14 +124,15 @@ def normalize(image_representation: torch.FloatTensor) -> torch.FloatTensor:
 
 
 def mnist_collate_fn(
-    batch: list[tuple[torch.FloatTensor, int]]
-) -> tuple[torch.FloatTensor, torch.LongTensor]:
-    raw_images, raw_labels = zip(*batch)
+    batch: list[tuple[torch.FloatTensor, int]],
+) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.LongTensor]:
+    idx, raw_images, raw_labels = zip(*batch)
 
+    idx = torch.tensor(idx, dtype=torch.int64)
     images = torch.stack([normalize(image.flatten()) for image in raw_images])
     labels = torch.tensor(raw_labels, dtype=torch.int64)
 
-    return images, labels
+    return idx, images, labels
 
 
 def calculate_hog_feature(
@@ -148,9 +166,9 @@ def calculate_color_histogram(
 
 
 def stl10_collate_fn(
-    batch: list[tuple[torch.FloatTensor, int]]
+    batch: list[tuple[torch.FloatTensor, int]],
 ) -> tuple[torch.FloatTensor, torch.LongTensor]:
-    images, raw_labels = zip(*batch)
+    idx, images, raw_labels = zip(*batch)
 
     images: torch.FloatTensor
 
@@ -169,11 +187,11 @@ def stl10_collate_fn(
     image_representations = torch.stack(image_representations)
     labels = torch.tensor(raw_labels, dtype=torch.int64)
 
-    return image_representations, labels
+    return torch.tensor(idx, dtype=torch.int64), image_representations, labels
 
 
 def reuters_collate_fn(
-    batch: list[tuple[PIMage.Image, int]]
+    batch: list[tuple[PIMage.Image, int]],
 ) -> tuple[torch.FloatTensor, torch.LongTensor]:
     raise NotImplementedError("REUTERS dataset not implemented yet")
 

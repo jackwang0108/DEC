@@ -1,6 +1,8 @@
 {
     "cSpell.words": [
         "histogramdd",
+        "kmeans",
+        "Maaten",
         "skimage"
     ],
     "debugpy.showPythonInlineValues": false
