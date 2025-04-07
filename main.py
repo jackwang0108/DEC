@@ -1,6 +1,30 @@
 """
 DEC (Unsupervised Deep Embedding for Clustering Analysis) 主程序
 
+读文章和写代码是两件事
+
+写代码就很简单了, 只需要把文章的流程搞明白
+读文章, 读到什么程度才算把文章彻底读透了: 背后的先验知识全部看懂了
+
+DEC一共就两步:
+    1. Parameter Initialization
+    2. Parameter Optimization
+
+代码逻辑:
+    1. 数据准备 (数据集)
+    2. 逐层训练SAE
+        2.1 单独训练每一层
+        2.2 联合训练所有层
+    3. 初始化聚类中心
+        3.1 训练集里所有图片过一遍训练好的Encoder得到特征
+        3.2 用kmeans聚类
+    4. 参数优化
+        4.1 每个样本提取特征
+        4.2 特征和每个类中心计算qij
+        4.3 根据qij计算出来pij
+        4.4 利用pij和qij计算KL散度
+        4.5 需要统计相邻的两个epoch之间有多少个样本改变了
+
     @Time    : 2025/02/25
     @Author  : JackWang
     @File    : main.py
@@ -10,11 +34,23 @@ DEC (Unsupervised Deep Embedding for Clustering Analysis) 主程序
 # Standard Library
 import datetime
 import argparse
+from io import StringIO
 from pathlib import Path
+from collections.abc import Callable
 
 # Third-Party Library
+import numpy as np
+from rich.table import Table
+from rich.console import Console
 from colorama import Fore, Style
 from kmeans_pytorch import kmeans
+from torchmetrics import ConfusionMatrix
+from scipy.optimize import linear_sum_assignment
+
+hungarian_optimal_assignments: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] = (
+    linear_sum_assignment
+)
+
 
 # Torch Library
 import torch
@@ -59,7 +95,7 @@ def sae_train_one_layer(
         dec.current_auto_encoder.parameters(), lr=0.001, weight_decay=0
     )
 
-    for epoch in range(num_epoch):
+    for epoch in range(num_epoch + 1):
 
         tot_loss = 0
 
@@ -205,11 +241,11 @@ def parameter_initialization(
 def soft_assignment(
     feature: torch.Tensor, centroids: torch.Tensor, alpha: float = 1.0
 ) -> torch.Tensor:
-    squared_distance = (feature.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)).norm(
+    euclidean_distance = (feature.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)).norm(
         p=2, dim=1
     )
 
-    upper_parts = (1 + squared_distance / alpha) ** (-(1 + alpha / 2))
+    upper_parts = (1 + euclidean_distance**2 / alpha) ** (-(1 + alpha / 2))
 
     qij = upper_parts / upper_parts.sum(dim=1, keepdim=True)
 
@@ -217,7 +253,7 @@ def soft_assignment(
 
 
 def target_distribution(qij: torch.Tensor) -> torch.Tensor:
-    fj = qij.sum(dim=1, keepdim=True)
+    fj = qij.sum(dim=0, keepdim=True)
 
     upper_parts = qij**2 / fj
 
@@ -227,30 +263,89 @@ def target_distribution(qij: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
+def get_preds(qij: torch.Tensor, centroids: torch.Tensor) -> torch.Tensor:
+    """Get the predicted labels"""
+    euclidean_distance = (qij.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)).norm(
+        p=2, dim=-1
+    )
+    return euclidean_distance.argmin(dim=-1)
+
+
+@torch.no_grad()
+def relabelling(
+    y_pred: torch.Tensor, y_true: torch.Tensor, num_classes: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Sec.4.2: ... For all algorithms we set the number of clusters to the number of ground-truth categories and evaluate performance with unsupervised clustering accuracy (ACC) ...
+    confusion_matrix: torch.Tensor = ConfusionMatrix(
+        task="multiclass", num_classes=num_classes
+    ).to(device)(y_pred, y_true)
+
+    confusion_matrix = confusion_matrix.cpu().numpy()
+
+    old_label, new_label = hungarian_optimal_assignments(-confusion_matrix)
+
+    optimal_mapping = np.zeros(num_classes, dtype=np.int64)
+    optimal_mapping[old_label] = new_label
+    optimal_mapping = torch.tensor(optimal_mapping, dtype=torch.long).to(device)
+
+    return optimal_mapping, optimal_mapping[y_pred]
+
+
+@torch.no_grad()
 def test_epoch(
     dec: DEC, centroids: torch.Tensor, alpha: float, test_loader: DataLoader
 ) -> float:
     """Test the model on the test set"""
     dec.eval()
 
-    accuracies = []
     image: torch.Tensor
-    label: torch.Tensor
-    feature: torch.Tensor
+    preds: torch.Tensor
+    preds: list[torch.Tensor] = []
+    labels: list[torch.Tensor] = []
     for _, image, label in test_loader:
         feature = dec.final_encoder(image.to(device))
+        qij = soft_assignment(feature, centroids, alpha)
 
-        accuracies.append(
-            calculate_accuracy(
-                y_true=label.to(device),
-                y_pred=soft_assignment(
-                    feature=feature, centroids=centroids, alpha=alpha
-                ).argmax(dim=1),
-            )
-        )
+        labels.append(label)
+        preds.append(get_preds(qij, centroids))
+
+    preds = torch.cat(preds, dim=0).to(device)
+    labels = torch.cat(labels, dim=0).to(device)
+
+    optimal_mapping, relabelled_preds = relabelling(preds, labels, centroids.shape[0])
+
+    acc = calculate_accuracy(y_true=labels, y_pred=relabelled_preds)
 
     dec.train()
-    return sum(accuracies) / len(accuracies)
+
+    return acc, optimal_mapping
+
+
+def get_mapping_table_rich(mapping: torch.Tensor, cols_per_block: int = 10) -> str:
+    console = Console(file=StringIO(), force_terminal=False)
+    original = range(len(mapping))
+    mapped = mapping.cpu().numpy()
+
+    for i in range(0, len(mapping), cols_per_block):
+        table = Table(
+            title=(
+                f"Block {i//cols_per_block + 1}"
+                if len(mapping) > cols_per_block
+                else ""
+            ),
+            show_header=True,
+        )
+        table.add_column("No.", justify="center")
+
+        for col_idx in range(i, min(i + cols_per_block, len(mapping))):
+            table.add_column(str(col_idx), justify="center")
+
+        table.add_row("Cluster ID", *[str(x) for x in original[i : i + cols_per_block]])
+        table.add_row("Class ID", *[str(x) for x in mapped[i : i + cols_per_block]])
+
+        console.print(table)
+
+    return console.file.getvalue()
 
 
 def parameter_optimization(
@@ -260,6 +355,7 @@ def parameter_optimization(
     test_loader: DataLoader,
     alpha: float = 1.0,
     total: int = 1,
+    num_epoch: int = 200,
 ) -> DEC:
     """Step 2: Parameter Optimization"""
     logger.warning("Step 2: Parameter Optimization")
@@ -286,14 +382,13 @@ def parameter_optimization(
     )
 
     changed_ratio = 1
-    while changed_ratio > total:
+    while changed_ratio > total or epoch < num_epoch:
 
         previous_results = current_results.clone()
 
         total_loss = 0
 
-        accuracies = []
-
+        # Training
         loss: torch.Tensor
         image: torch.Tensor
         label: torch.Tensor
@@ -321,23 +416,21 @@ def parameter_optimization(
             total_loss += loss.item()
 
             # update the current results
-            current_results[idx] = qij.argmax(dim=1)
-
-            accuracies.append(
-                calculate_accuracy(
-                    y_true=label,
-                    y_pred=current_results[idx],
-                )
-            )
+            current_results[idx] = get_preds(qij=qij, centroids=centroids)
 
         changed_ratio = (current_results != previous_results).sum() / len(
             train_loader.dataset
         )
+
+        # Testing
+        acc, optimal_mapping = test_epoch(
+            dec=dec, centroids=centroids, alpha=alpha, test_loader=test_loader
+        )
+
         logger.info(
             f"\t\tEpoch [{epoch + 1}], "
             f"Loss: {Fore.CYAN}{total_loss / len(train_loader):.5f}{Fore.RESET}, "
-            f"Training Accuracy: {Fore.CYAN}{sum(accuracies) / len(accuracies):.2f}%{Fore.RESET}, "
-            f"Testing Accuracy: {Fore.CYAN}{test_epoch(dec, centroids, alpha, test_loader):.2f}%{Fore.RESET}"
+            f"Testing Accuracy: {Fore.CYAN}{acc * 100:.2f}%{Fore.RESET}"
             + (
                 ""
                 if epoch == 0
@@ -345,6 +438,10 @@ def parameter_optimization(
             )
             + f"{Fore.RESET}"
         )
+
+        logger.info("\t\tCurrent Cluster-Class Mapping")
+        for line in str(get_mapping_table_rich(optimal_mapping)).split("\n"):
+            logger.info(f"\t\t\t{line}")
 
         epoch += 1
 
@@ -406,6 +503,7 @@ def main(args: argparse.Namespace):
         test_loader,
         alpha=args.alpha,
         total=args.total,
+        num_epoch=args.num_epoch,
     )
 
     # Step 3: Testing
