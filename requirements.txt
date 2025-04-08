@@ -5,7 +5,8 @@ numpy==2.2.4
 Pillow==11.1.0
 rich==14.0.0
 scipy==1.15.2
-skimage==0.0
+scikit-image==0.25.2
+tqdm==4.67.1
 torch==2.6.0
 torchmetrics==1.7.0
 torchvision==0.21.0
