@@ -74,13 +74,15 @@ from datasets import (
     reuters_collate_fn,
 )
 
+# TODO: 添加pretrained autoencoder参数加载
+
 device = torch.device(f"cuda:{get_freer_gpu()}" if torch.cuda.is_available() else "cpu")
 
-log_dir = (
-    Path(__file__).resolve().parent
-    / f"logs/{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-)
+t = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+log_dir = Path(__file__).resolve().parent / f"logs/{t}"
 log_dir.mkdir(parents=True, exist_ok=True)
+weights_dir = log_dir.parent.parent / "weights"
+weights_dir.mkdir(parents=True, exist_ok=True)
 logger = get_logger(log_file=log_dir / "log.log")
 
 logger.success("DEC: Unsupervised Deep Embedding for Clustering Analysis")
@@ -118,7 +120,7 @@ def sae_train_one_layer(
 
         if epoch % 10 == 0:
             logger.info(
-                f"\t\tEpoch [{epoch + 1:{len(str(num_epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{tot_loss / len(train_loader):.4f}{Fore.RESET}"
+                f"\t\tEpoch [{epoch:{len(str(num_epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{tot_loss / len(train_loader):.4f}{Fore.RESET}"
             )
 
     return dec
@@ -132,7 +134,7 @@ def sae_final_finetune(dec: DEC, train_loader: DataLoader, num_epoch: int = 200)
         weight_decay=0,
     )
 
-    for epoch in range(num_epoch):
+    for epoch in range(num_epoch + 1):
 
         tot_loss = 0
 
@@ -154,7 +156,7 @@ def sae_final_finetune(dec: DEC, train_loader: DataLoader, num_epoch: int = 200)
 
         if epoch % 10 == 0:
             logger.info(
-                f"\t    Epoch [{epoch + 1:{len(str(num_epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{tot_loss / len(train_loader):.4f}{Fore.RESET}"
+                f"\t    Epoch [{epoch:{len(str(num_epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{tot_loss / len(train_loader):.4f}{Fore.RESET}"
             )
 
     return dec
@@ -182,19 +184,33 @@ def dec_get_centroids(
 
 
 def parameter_initialization(
-    dec: DEC, train_loader: DataLoader, num_clusters: int, num_epoch: int = 1
+    dec: DEC,
+    train_loader: DataLoader,
+    num_clusters: int,
+    num_epoch: int = 1,
+    save_path: Path = None,
+    pretrained_weights: Path = None,
 ) -> tuple[DEC, torch.Tensor]:
     """Step 1: Parameter Initialization"""
     logger.warning("Step 1: Parameter Initialization")
 
-    # Sec.3.2: ... We initialize DEC with a stacked autoencoder (SAE) because ...
-    logger.info("\tInitializing DEC with a stacked autoencoder (SAE)")
+    # Skip if pretrained_weights is provided:
+    if pretrained_weights is None:
+        trainer = sae_train_one_layer
+
+        # Sec.3.2: ... We initialize DEC with a stacked autoencoder (SAE) because ...
+        logger.info("\tInitializing DEC with a stacked autoencoder (SAE)")
+    else:
+        trainer = lambda dec, train_loader, num_epoch: dec
+
+        logger.info(f"Loading pretrained weights from {pretrained_weights}")
 
     num_dims = [next(iter(train_loader))[1].shape[1], 500, 500, 2000, 10]
 
     # Sec.3.2: ... We initialize the SAE network layer by layer with each layer being a de-noising autoencoder trained to reconstruct the previous layer’s output after random corruption (Vincent et al., 2010) ...
+    if pretrained_weights is None:
+        logger.info(f"\t{Fore.MAGENTA}[1] SAE layer-wise training{Fore.RESET}")
 
-    logger.info(f"\t{Fore.MAGENTA}[1] SAE layer-wise training{Fore.RESET}")
     for layer_idx, (in_dim, out_dim) in enumerate(zip(num_dims[:-1], num_dims[1:])):
 
         logger.debug(
@@ -215,7 +231,13 @@ def parameter_initialization(
             device=device,
         ):
 
-            dec = sae_train_one_layer(dec, train_loader, num_epoch)
+            dec = trainer(dec, train_loader, num_epoch)
+
+    if pretrained_weights is not None:
+
+        saved_data = torch.load(pretrained_weights, map_location=device)
+        dec.load_state_dict(saved_data["model"])
+        return dec, saved_data["centroids"]
 
     # Sec.3.2: ... After greedy layer-wise training, we concatenate all encoder layers followed by all decoder layers, in reverse layer-wise training order, to form a deep autoencoder and then finetune it to minimize reconstruction loss ...
     logger.info(f"\t{Fore.MAGENTA}[2] SAE deep autoencoder finetune{Fore.RESET}")
@@ -234,6 +256,21 @@ def parameter_initialization(
     )
 
     centroids = dec_get_centroids(dec, train_loader, num_clusters)
+
+    # save the pretrained weights if requested
+    if save_path is not None:
+        logger.info(f"\tSaving pretrained weights to {save_path}")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model": dec.to("cpu").state_dict(),
+                "centroids": centroids.to("cpu"),
+                "num_clusters": num_clusters,
+                "dataset": train_loader.dataset.__class__.__name__,
+                "training_at": t,
+            },
+            save_path,
+        )
 
     return (dec, centroids)
 
@@ -307,7 +344,8 @@ def test_epoch(
         qij = soft_assignment(feature, centroids, alpha)
 
         labels.append(label)
-        preds.append(get_preds(qij, centroids))
+        # preds.append(get_preds(qij, centroids))
+        preds.append(qij.argmax(dim=1))
 
     preds = torch.cat(preds, dim=0).to(device)
     labels = torch.cat(labels, dim=0).to(device)
@@ -360,13 +398,20 @@ def parameter_optimization(
     """Step 2: Parameter Optimization"""
     logger.warning("Step 2: Parameter Optimization")
 
+    # .to也是一个操作, 会导致centroids变为非叶子结点, 所以要先移动, 在转为Parameter
+    # centroids = nn.Parameter(initial_centroids, requires_grad=True).to(device)
+    centroids = nn.Parameter(
+        initial_centroids.clone().detach().to(device), requires_grad=True
+    )
+
     optimizer = optim.SGD(
-        dec.final_encoder.parameters(), lr=0.001, weight_decay=0, momentum=0
+        list(dec.final_encoder.parameters()) + [centroids],
+        lr=0.001,
+        weight_decay=0,
+        momentum=0.9,
     )
 
     kl_divergence = nn.KLDivLoss(reduction="batchmean")
-
-    centroids = nn.Parameter(initial_centroids, requires_grad=True).to(device)
 
     # Sec.3.1.3: ... For the purpose of discovering cluster assignments, we stop our procedure when less than tol% of points change cluster assignment between two consecutive iterations. ...
     logger.info(
@@ -416,7 +461,8 @@ def parameter_optimization(
             total_loss += loss.item()
 
             # update the current results
-            current_results[idx] = get_preds(qij=qij, centroids=centroids)
+            current_results[idx] = qij.argmax(dim=1)
+            # current_results[idx] = get_preds(qij=qij, centroids=centroids)
 
         changed_ratio = (current_results != previous_results).sum() / len(
             train_loader.dataset
@@ -428,7 +474,7 @@ def parameter_optimization(
         )
 
         logger.info(
-            f"\t\tEpoch [{epoch + 1}], "
+            f"\t\tEpoch [{epoch}], "
             f"Loss: {Fore.CYAN}{total_loss / len(train_loader):.5f}{Fore.RESET}, "
             f"Testing Accuracy: {Fore.CYAN}{acc * 100:.2f}%{Fore.RESET}"
             + (
@@ -439,9 +485,10 @@ def parameter_optimization(
             + f"{Fore.RESET}"
         )
 
-        logger.info("\t\tCurrent Cluster-Class Mapping")
-        for line in str(get_mapping_table_rich(optimal_mapping)).split("\n"):
-            logger.info(f"\t\t\t{line}")
+        if epoch % 5 == 0:
+            logger.info("\t\tCurrent Cluster-Class Mapping")
+            for line in str(get_mapping_table_rich(optimal_mapping)).split("\n"):
+                logger.info(f"\t\t\t{line}")
 
         epoch += 1
 
@@ -490,10 +537,17 @@ def main(args: argparse.Namespace):
 
     # Step 1: Parameter Initialization
     dec, centroids = parameter_initialization(
-        dec, train_loader, num_clusters=args.num_clusters, num_epoch=args.num_epoch
+        dec,
+        train_loader,
+        num_clusters=args.num_clusters,
+        num_epoch=args.num_epoch,
+        save_path=(
+            weights_dir / args.dataset / f"{t}.pth" if args.save_weights else None
+        ),
+        pretrained_weights=(
+            Path(args.pretrain_weights) if args.pretrain_weights else None
+        ),
     )
-
-    torch.save(dec, log_dir / "dec.pth")
 
     # Step 2: Parameter Optimization
     dec = parameter_optimization(
@@ -503,7 +557,7 @@ def main(args: argparse.Namespace):
         test_loader,
         alpha=args.alpha,
         total=args.total,
-        num_epoch=args.num_epoch,
+        # num_epoch=args.num_epoch,
     )
 
     # Step 3: Testing

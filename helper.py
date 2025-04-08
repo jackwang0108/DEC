@@ -36,6 +36,17 @@ def get_args() -> argparse.Namespace:
         help="The dataset to use",
     )
     parser.add_argument(
+        "--pretrain_weights",
+        type=str,
+        default="",
+        help="The path to the pre-trained weights of autoencoder",
+    )
+    parser.add_argument(
+        "--save_weights",
+        action="store_true",
+        help="Whether to save the pre-trained weights of autoencoder",
+    )
+    parser.add_argument(
         "--batch_size",
         type=int,
         default=256,
@@ -56,7 +67,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--alpha",
         type=float,
-        default=1.0,
+        default=10.0,
         help="degrees of freedom of the Student’s t- distribution",
     )
     parser.add_argument(
