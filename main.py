@@ -74,7 +74,6 @@ from datasets import (
     reuters_collate_fn,
 )
 
-# TODO: 添加pretrained autoencoder参数加载
 
 device = torch.device(f"cuda:{get_freer_gpu()}" if torch.cuda.is_available() else "cpu")
 
@@ -203,7 +202,7 @@ def parameter_initialization(
     else:
         trainer = lambda dec, train_loader, num_epoch: dec
 
-        logger.info(f"Loading pretrained weights from {pretrained_weights}")
+        logger.info(f"\tLoading pretrained weights from {pretrained_weights}")
 
     num_dims = [next(iter(train_loader))[1].shape[1], 500, 500, 2000, 10]
 
@@ -237,6 +236,8 @@ def parameter_initialization(
 
         saved_data = torch.load(pretrained_weights, map_location=device)
         dec.load_state_dict(saved_data["model"])
+        for param in dec.parameters():
+            param.requires_grad = True
         return dec, saved_data["centroids"]
 
     # Sec.3.2: ... After greedy layer-wise training, we concatenate all encoder layers followed by all decoder layers, in reverse layer-wise training order, to form a deep autoencoder and then finetune it to minimize reconstruction loss ...
@@ -287,36 +288,65 @@ def soft_assignment(
             z_i = argmin_k ||x_i − μ_k ||**2
     因为是argmin操作, 所以每个样本只能属于一个簇
 
-    但是在DEC中, 我们使用的是**软分配（soft assignment）**. 所谓软分配的含义, 就是使用相似度/概率来描述样本属于的簇, 此时针对一个样本, 就可以得到一个相似度向量, 取softmax之后就可以转为概率
+    但是在DEC中, 我们使用的是**软分配（soft assignment）**. 所谓软分配的含义, 就是使用相似度/概率来描述样本属于的簇, 此时针对一个样本, 就可以得到一个相似度向量, 进行归一化操作之后, 使得和为1之后, 即可视为概率向量
     """
-    similarity = (feature.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)).norm(
-        p=2, dim=1
+    distribution = ((feature.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)) ** 2).sum(
+        dim=2
     )
 
-    upper_parts = (1 + similarity**2 / alpha) ** (-(1 + alpha / 2))
+    qij = (1 + distribution / alpha) ** (-(alpha + 1) / 2)
 
-    qij = upper_parts / upper_parts.sum(dim=1, keepdim=True)
-
-    return qij
+    return qij / qij.sum(dim=1, keepdim=True)
 
 
-def target_distribution(qij: torch.Tensor) -> torch.Tensor:
-    fj = qij.sum(dim=0, keepdim=True)
+def target_distribution(
+    qij: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    DEC的基础是流型假设
 
-    upper_parts = qij**2 / fj
+    流型假设 (数学的讲)
+        1. 数据观测维度 ≠ 真实维度：
+            例如人脸图片（像素维度=3072 for 32x32x3）
+            实际可能由**光照、姿态、表情等少量参数（~10维）**控制
+        2. 流形假设（Manifold Hypothesis）：
+            真实数据通常**集中**在嵌入高维空间的低维流形上
 
-    pij = upper_parts / upper_parts.sum(dim=1, keepdim=True)
+    换人话来说, 流型其实就是特征. 因此用计算机的话来解释流形学习就是:
+        1. 数据观测维度 ≠ 真实维度
+            数据观测维度信息密度太低了, 并且存在很多噪声
+        2. 流形假设（Manifold Hypothesis）:
+            特征在纯净的特征空间中是集中分布的
 
-    return pij
+    对于DEC而言, 他就是用一个AutoEncoder来学习一个低维的流形 (特征)
+
+    在此基础上, DEC的核心先验知识是: **初始的高置信度的聚类结果大部分都是对的**
+
+    什么意思?
+
+    我们现在通过SAE训练好的AutoEncoder提取到的特征已经足够好了, 使得KMeans聚类得到的结果已经蛮不错了, 我们在Optimization时候需要继续优化.
+
+    例如, 对于一个给定的样本, 计算出来的qij中如果有一个值是0.7, 其他值加起来是0.3, 那么我们有充足的理由相信, 这个样本就是属于0.7这个簇的
+
+    所以, 我们在优化阶段需要做的, 就是让qij的尖顶更加突出, 其余地方更加平缓
+    """
+
+    # qij 可以理解为概率分布, 代表了每个样本属于每个簇的概率
+    # 对所有样本求和后得到的 fj 则描述了簇中的样本数量
+    fj = qij.sum(dim=0, keepdim=True) + eps
+
+    # qij平方之后, 大的地方更大, 小的地方更小, e.g., 0.9 vs 0.1 -> 0.81 vs 0.01
+    # 然后去除一下频率的影响, 本质上是考虑了类别不均衡, 但是很粗糙
+    pij = (qij**2 + eps) / fj
+
+    return (pij / (pij.sum(dim=1, keepdim=True) + eps)).detach()
 
 
-@torch.no_grad()
-def get_preds(qij: torch.Tensor, centroids: torch.Tensor) -> torch.Tensor:
-    """Get the predicted labels"""
-    euclidean_distance = (qij.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)).norm(
-        p=2, dim=-1
-    )
-    return euclidean_distance.argmin(dim=-1)
+def kl_div_loss(
+    y_true: torch.Tensor, y_pred: torch.Tensor, eps: float = 1e-8
+) -> torch.Tensor:
+    return (y_true * torch.log(y_true / (y_pred + eps) + eps)).sum(1).mean()
 
 
 @torch.no_grad()
@@ -330,7 +360,9 @@ def relabelling(
 
     confusion_matrix = confusion_matrix.cpu().numpy()
 
-    old_label, new_label = hungarian_optimal_assignments(-confusion_matrix)
+    old_label, new_label = hungarian_optimal_assignments(
+        confusion_matrix.max() - confusion_matrix
+    )
 
     optimal_mapping = np.zeros(num_classes, dtype=np.int64)
     optimal_mapping[old_label] = new_label
@@ -355,7 +387,6 @@ def test_epoch(
         qij = soft_assignment(feature, centroids, alpha)
 
         labels.append(label)
-        # preds.append(get_preds(qij, centroids))
         preds.append(qij.argmax(dim=1))
 
     preds = torch.cat(preds, dim=0).to(device)
@@ -463,7 +494,8 @@ def parameter_optimization(
             pij = target_distribution(qij)
 
             # https://www.zhihu.com/question/384982085/answer/3111848737
-            loss = kl_divergence(torch.log(qij + 1e-10), pij)
+            loss = kl_divergence(torch.log(qij), pij)
+            # loss = kl_div_loss(y_pred=qij, y_true=pij)
 
             optimizer.zero_grad()
             loss.backward()

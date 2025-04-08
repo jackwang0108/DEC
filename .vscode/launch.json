@@ -14,8 +14,8 @@
                 "--num_epoch",
                 "1",
                 "--save_weights",
-                "--pretrain_weights",
-                "${workspaceFolder}/weights/MNIST/2025-04-08_15-13-25.pth"
+                // "--pretrain_weights",
+                // "${workspaceFolder}/weights/MNIST/2025-04-08_15-58-10.pth"
             ]
         }
     ]
