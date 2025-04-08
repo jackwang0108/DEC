@@ -67,7 +67,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--alpha",
         type=float,
-        default=10.0,
+        default=1.0,
         help="degrees of freedom of the Student’s t- distribution",
     )
     parser.add_argument(

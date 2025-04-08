@@ -278,11 +278,22 @@ def parameter_initialization(
 def soft_assignment(
     feature: torch.Tensor, centroids: torch.Tensor, alpha: float = 1.0
 ) -> torch.Tensor:
-    euclidean_distance = (feature.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)).norm(
+    """
+    在分类任务中, 我们常说的是分类这个词 (classification), 即将一个样本划分到某一个类中
+
+    但是对于聚类任务, 我们更关心的是样本和聚类中心 (即簇), 因此我们更常说的是分配 (assignment) 这个词, 即将一个样本分配到某一个簇中
+
+    传统聚类（如K-means）中，每个样本会被**硬分配（hard assignment）**到唯一的簇, 即:
+            z_i = argmin_k ||x_i − μ_k ||**2
+    因为是argmin操作, 所以每个样本只能属于一个簇
+
+    但是在DEC中, 我们使用的是**软分配（soft assignment）**. 所谓软分配的含义, 就是使用相似度/概率来描述样本属于的簇, 此时针对一个样本, 就可以得到一个相似度向量, 取softmax之后就可以转为概率
+    """
+    similarity = (feature.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)).norm(
         p=2, dim=1
     )
 
-    upper_parts = (1 + euclidean_distance**2 / alpha) ** (-(1 + alpha / 2))
+    upper_parts = (1 + similarity**2 / alpha) ** (-(1 + alpha / 2))
 
     qij = upper_parts / upper_parts.sum(dim=1, keepdim=True)
 
