@@ -53,10 +53,16 @@ def get_args() -> argparse.Namespace:
         help="The batch size for training",
     )
     parser.add_argument(
-        "--num_epoch",
+        "--pretrain_iterations",
         type=int,
-        default=200,
-        help="The number of epochs to train",
+        default=50000,
+        help="The number of iterations when training the autoencoder layer-wisely",
+    )
+    parser.add_argument(
+        "--finetune_iterations",
+        type=int,
+        default=100000,
+        help="The number of iterations when final finetuning the autoencoder",
     )
     parser.add_argument(
         "--seed",

@@ -54,8 +54,8 @@ class DEC(nn.Module):
         ).to(device)
 
         # Sec.4.3 Implementation: ... we initialize the weights to random numbers drawn from a zero-mean Gaussian distribution with a standard deviation of 0.01 ...
-        # nn.init.normal_(encoder[1].weight, mean=0, std=0.01)
-        # nn.init.normal_(decoder[1].weight, mean=0, std=0.01)
+        nn.init.normal_(encoder[1].weight, mean=0, std=0.01)
+        nn.init.normal_(decoder[1].weight, mean=0, std=0.01)
 
         self.auto_encoders.add_module(
             name=f"autoencoder {len(self.auto_encoders) + 1}",
@@ -66,9 +66,6 @@ class DEC(nn.Module):
 
         yield self
 
-        self.final_encoder.append(encoder)
-        self.final_decoder.insert(0, decoder)
-
         # freeze the weights of the trained encoder
         if freeze:
             for param in self.final_encoder.parameters():
@@ -76,6 +73,9 @@ class DEC(nn.Module):
 
             for param in self.final_decoder.parameters():
                 param.requires_grad = False
+
+        self.final_encoder.append(encoder)
+        self.final_decoder.insert(0, decoder)
 
 
 if __name__ == "__main__":

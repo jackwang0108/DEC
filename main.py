@@ -88,15 +88,15 @@ logger.success("DEC: Unsupervised Deep Embedding for Clustering Analysis")
 
 
 def sae_train_one_layer(
-    dec: DEC, train_loader: DataLoader, num_epoch: int = 200
+    dec: DEC, train_loader: DataLoader, num_iteration: int = 50000
 ) -> DEC:
-
     loss_func = nn.MSELoss()
     optimizer = optim.SGD(
         dec.current_auto_encoder.parameters(), lr=0.001, weight_decay=0
     )
 
-    for epoch in range(num_epoch + 1):
+    iteration = 0
+    while iteration < num_iteration:
 
         tot_loss = 0
 
@@ -107,7 +107,7 @@ def sae_train_one_layer(
             image = image.to(device)
 
             # reconstruction the output of the previous layer
-            x = dec.final_encoder(image.to(device))
+            x = dec.final_encoder(image)
             y = dec.current_auto_encoder(x)
             loss = loss_func(y, x)
 
@@ -117,23 +117,57 @@ def sae_train_one_layer(
             optimizer.step()
             optimizer.zero_grad()
 
-        if epoch % 10 == 0:
-            logger.info(
-                f"\t\tEpoch [{epoch:{len(str(num_epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{tot_loss / len(train_loader):.4f}{Fore.RESET}"
-            )
+            if iteration % (num_iteration // 10) == 0:
+                logger.info(
+                    f"\t\tIteration [{iteration:{len(str(num_iteration))}}/{num_iteration}], Loss: {Fore.CYAN}{tot_loss / 2000:.4f}{Fore.RESET}"
+                )
+                tot_loss = 0
+
+            iteration += 1
+            if iteration > num_iteration:
+                break
 
     return dec
 
 
-def sae_final_finetune(dec: DEC, train_loader: DataLoader, num_epoch: int = 200) -> DEC:
+def sae_remove_dropout(
+    dec: DEC,
+) -> DEC:
+    for name, parent_module in list(dec.final_encoder.named_children()) + list(
+        dec.final_decoder.named_children()
+    ):
+        if isinstance(parent_module, nn.Sequential):
+            for name, module in list(parent_module.named_children()):
+                if isinstance(module, nn.Dropout):
+                    parent_module._modules[name] = nn.Identity()
+
+    dec.final_encoder.train()
+    dec.final_decoder.train()
+    for param in list(dec.final_encoder.parameters()) + list(
+        dec.final_decoder.parameters()
+    ):
+        param.requires_grad = True
+
+    return dec
+
+
+def sae_final_finetune(
+    dec: DEC, train_loader: DataLoader, num_iteration: int = 100000
+) -> DEC:
+
+    # Sec.4.3 ... The entire deep autoencoder is further finetuned for 100000 iterations without dropout ...
+    logger.info(f"\tRemoving dropout layers from the entire autoencoder")
+    dec = sae_remove_dropout(dec)
+
     loss_func = nn.MSELoss()
     optimizer = optim.SGD(
         list(dec.final_encoder.parameters()) + list(dec.final_decoder.parameters()),
         lr=0.001,
-        weight_decay=0,
     )
 
-    for epoch in range(num_epoch + 1):
+    iteration = 0
+    logger.info(f"\tFinal finetuning the entire autoencoder")
+    while iteration < num_iteration:
 
         tot_loss = 0
 
@@ -153,10 +187,16 @@ def sae_final_finetune(dec: DEC, train_loader: DataLoader, num_epoch: int = 200)
             optimizer.step()
             optimizer.zero_grad()
 
-        if epoch % 10 == 0:
-            logger.info(
-                f"\t    Epoch [{epoch:{len(str(num_epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{tot_loss / len(train_loader):.4f}{Fore.RESET}"
-            )
+            if iteration % (num_iteration // 10) == 0:
+                logger.info(
+                    f"\t\tIteration [{iteration:{len(str(num_iteration))}}/{num_iteration}], Loss: {Fore.CYAN}{tot_loss / 2000:.4f}{Fore.RESET}"
+                )
+                tot_loss = 0
+
+            iteration += 1
+
+            if iteration > num_iteration:
+                break
 
     return dec
 
@@ -186,7 +226,8 @@ def parameter_initialization(
     dec: DEC,
     train_loader: DataLoader,
     num_clusters: int,
-    num_epoch: int = 1,
+    pretrain_iterations: int = 50000,
+    finetune_iterations: int = 100000,
     save_path: Path = None,
     pretrained_weights: Path = None,
 ) -> tuple[DEC, torch.Tensor]:
@@ -230,11 +271,11 @@ def parameter_initialization(
             device=device,
         ):
 
-            dec = trainer(dec, train_loader, num_epoch)
+            dec = trainer(dec, train_loader, pretrain_iterations)
 
     if pretrained_weights is not None:
-
         saved_data = torch.load(pretrained_weights, map_location=device)
+        dec = sae_remove_dropout(dec)
         dec.load_state_dict(saved_data["model"])
         for param in dec.parameters():
             param.requires_grad = True
@@ -243,13 +284,7 @@ def parameter_initialization(
     # Sec.3.2: ... After greedy layer-wise training, we concatenate all encoder layers followed by all decoder layers, in reverse layer-wise training order, to form a deep autoencoder and then finetune it to minimize reconstruction loss ...
     logger.info(f"\t{Fore.MAGENTA}[2] SAE deep autoencoder finetune{Fore.RESET}")
 
-    for param in dec.final_encoder.parameters():
-        param.requires_grad = True
-
-    for param in dec.final_decoder.parameters():
-        param.requires_grad = True
-
-    dec = sae_final_finetune(dec, train_loader, num_epoch)
+    dec = sae_final_finetune(dec, train_loader, finetune_iterations)
 
     # Sec.3.2: ... To initialize the cluster centers, we pass the data through the initialized DNN to get embedded data points and then perform standard k-means clustering ...
     logger.info(
@@ -264,7 +299,10 @@ def parameter_initialization(
         save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "model": dec.to("cpu").state_dict(),
+                "model": {
+                    k: (v.to("cpu") if isinstance(v, torch.Tensor) else v)
+                    for k, v in dec.state_dict().items()
+                },
                 "centroids": centroids.to("cpu"),
                 "num_clusters": num_clusters,
                 "dataset": train_loader.dataset.__class__.__name__,
@@ -450,7 +488,6 @@ def parameter_optimization(
         list(dec.final_encoder.parameters()) + [centroids],
         lr=0.001,
         weight_decay=0,
-        momentum=0.9,
     )
 
     kl_divergence = nn.KLDivLoss(reduction="batchmean")
@@ -494,7 +531,7 @@ def parameter_optimization(
             pij = target_distribution(qij)
 
             # https://www.zhihu.com/question/384982085/answer/3111848737
-            loss = kl_divergence(torch.log(qij), pij)
+            loss = kl_divergence(torch.log(qij + 1e-10), pij)
             # loss = kl_div_loss(y_pred=qij, y_true=pij)
 
             optimizer.zero_grad()
@@ -583,7 +620,8 @@ def main(args: argparse.Namespace):
         dec,
         train_loader,
         num_clusters=args.num_clusters,
-        num_epoch=args.num_epoch,
+        pretrain_iterations=args.pretrain_iterations,
+        finetune_iterations=args.finetune_iterations,
         save_path=(
             weights_dir / args.dataset / f"{t}.pth" if args.save_weights else None
         ),
