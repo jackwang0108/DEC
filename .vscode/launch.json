@@ -11,10 +11,10 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "--pretrain_iterations",
-                "10",
-                "--finetune_iterations",
-                "10",
+                "--init_epochs",
+                "1",
+                "--finetune_epochs",
+                "1",
                 "--save_weights",
                 // "--pretrain_weights",
                 // "${workspaceFolder}/weights/MNIST/2025-04-09_20-42-06.pth"

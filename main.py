@@ -84,21 +84,18 @@ weights_dir = log_dir.parent.parent / "weights"
 weights_dir.mkdir(parents=True, exist_ok=True)
 logger = get_logger(log_file=log_dir / "log.log")
 
-logger.success("DEC: Unsupervised Deep Embedding for Clustering Analysis")
-
 
 def sae_train_one_layer(
-    dec: DEC, train_loader: DataLoader, num_iteration: int = 50000
+    dec: DEC, train_loader: DataLoader, num_epoch: int = 235
 ) -> DEC:
     loss_func = nn.MSELoss()
     optimizer = optim.SGD(
         dec.current_auto_encoder.parameters(), lr=0.001, weight_decay=0
     )
 
-    iteration = 0
-    while iteration < num_iteration:
+    for epoch in range(num_epoch):
 
-        tot_loss = 0
+        epoch_loss = 0
 
         loss: torch.FloatTensor
         image: torch.FloatTensor
@@ -111,22 +108,16 @@ def sae_train_one_layer(
             y = dec.current_auto_encoder(x)
             loss = loss_func(y, x)
 
-            tot_loss += loss.item()
+            epoch_loss += loss.item()
 
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
 
-            if iteration % (num_iteration // 10) == 0:
-                logger.info(
-                    f"\t\tIteration [{iteration:{len(str(num_iteration))}}/{num_iteration}], Loss: {Fore.CYAN}{tot_loss / 2000:.4f}{Fore.RESET}"
-                )
-                tot_loss = 0
-
-            iteration += 1
-            if iteration > num_iteration:
-                break
-
+        if epoch % 10 == 0:
+            logger.info(
+                f"\t\tEpoch [{epoch:{len(str(num_epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{epoch_loss / len(train_loader):.4f}{Fore.RESET}"
+            )
     return dec
 
 
@@ -151,12 +142,10 @@ def sae_remove_dropout(
     return dec
 
 
-def sae_final_finetune(
-    dec: DEC, train_loader: DataLoader, num_iteration: int = 100000
-) -> DEC:
+def sae_final_finetune(dec: DEC, train_loader: DataLoader, num_epoch: int = 470) -> DEC:
 
     # Sec.4.3 ... The entire deep autoencoder is further finetuned for 100000 iterations without dropout ...
-    logger.info(f"\tRemoving dropout layers from the entire autoencoder")
+    logger.info(f"\t\tRemoving dropout layers from the entire autoencoder")
     dec = sae_remove_dropout(dec)
 
     loss_func = nn.MSELoss()
@@ -165,11 +154,10 @@ def sae_final_finetune(
         lr=0.001,
     )
 
-    iteration = 0
-    logger.info(f"\tFinal finetuning the entire autoencoder")
-    while iteration < num_iteration:
+    logger.info(f"\t\tFinal finetuning the entire autoencoder")
+    for epoch in range(num_epoch):
 
-        tot_loss = 0
+        epoch_loss = 0
 
         loss: torch.FloatTensor
         image: torch.FloatTensor
@@ -181,22 +169,16 @@ def sae_final_finetune(
 
             loss = loss_func(reconstructed_image, image)
 
-            tot_loss += loss.item()
+            epoch_loss += loss.item()
 
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
 
-            if iteration % (num_iteration // 10) == 0:
-                logger.info(
-                    f"\t\tIteration [{iteration:{len(str(num_iteration))}}/{num_iteration}], Loss: {Fore.CYAN}{tot_loss / 2000:.4f}{Fore.RESET}"
-                )
-                tot_loss = 0
-
-            iteration += 1
-
-            if iteration > num_iteration:
-                break
+        if epoch % 10 == 0:
+            logger.info(
+                f"\t\t\tEpoch [{epoch:{len(str(epoch))}}/{num_epoch}], Loss: {Fore.CYAN}{epoch_loss / len(train_loader):.4f}{Fore.RESET}"
+            )
 
     return dec
 
@@ -226,8 +208,8 @@ def parameter_initialization(
     dec: DEC,
     train_loader: DataLoader,
     num_clusters: int,
-    pretrain_iterations: int = 50000,
-    finetune_iterations: int = 100000,
+    init_epochs: int = 235,
+    finetune_epochs: int = 470,
     save_path: Path = None,
     pretrained_weights: Path = None,
 ) -> tuple[DEC, torch.Tensor]:
@@ -271,7 +253,7 @@ def parameter_initialization(
             device=device,
         ):
 
-            dec = trainer(dec, train_loader, pretrain_iterations)
+            dec = trainer(dec, train_loader, init_epochs)
 
     if pretrained_weights is not None:
         saved_data = torch.load(pretrained_weights, map_location=device)
@@ -284,7 +266,7 @@ def parameter_initialization(
     # Sec.3.2: ... After greedy layer-wise training, we concatenate all encoder layers followed by all decoder layers, in reverse layer-wise training order, to form a deep autoencoder and then finetune it to minimize reconstruction loss ...
     logger.info(f"\t{Fore.MAGENTA}[2] SAE deep autoencoder finetune{Fore.RESET}")
 
-    dec = sae_final_finetune(dec, train_loader, finetune_iterations)
+    dec = sae_final_finetune(dec, train_loader, finetune_epochs)
 
     # Sec.3.2: ... To initialize the cluster centers, we pass the data through the initialized DNN to get embedded data points and then perform standard k-means clustering ...
     logger.info(
@@ -295,12 +277,14 @@ def parameter_initialization(
 
     # save the pretrained weights if requested
     if save_path is not None:
-        logger.info(f"\tSaving pretrained weights to {save_path}")
+        logger.info(
+            f"\t{Fore.MAGENTA}Saving pretrained weights to {save_path}{Fore.RESET}"
+        )
         save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
                 "model": {
-                    k: (v.to("cpu") if isinstance(v, torch.Tensor) else v)
+                    k: (v.detach().cpu().clone() if isinstance(v, torch.Tensor) else v)
                     for k, v in dec.state_dict().items()
                 },
                 "centroids": centroids.to("cpu"),
@@ -374,7 +358,6 @@ def target_distribution(
     # 对所有样本求和后得到的 fj 则描述了簇中的样本数量
     fj = qij.sum(dim=0, keepdim=True) + eps
 
-    # qij平方之后, 大的地方更大, 小的地方更小, e.g., 0.9 vs 0.1 -> 0.81 vs 0.01
     # 然后去除一下频率的影响, 本质上是考虑了类别不均衡, 但是很粗糙
     pij = (qij**2 + eps) / fj
 
@@ -581,6 +564,8 @@ def testing(
 
 def main(args: argparse.Namespace):
 
+    logger.success("DEC: Unsupervised Deep Embedding for Clustering Analysis")
+
     logger.info("Arguments:")
     for key, value in vars(args).items():
         logger.debug(f"\t{key}: {value}")
@@ -620,8 +605,8 @@ def main(args: argparse.Namespace):
         dec,
         train_loader,
         num_clusters=args.num_clusters,
-        pretrain_iterations=args.pretrain_iterations,
-        finetune_iterations=args.finetune_iterations,
+        init_epochs=args.init_epochs,
+        finetune_epochs=args.finetune_epochs,
         save_path=(
             weights_dir / args.dataset / f"{t}.pth" if args.save_weights else None
         ),

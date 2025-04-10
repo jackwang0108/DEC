@@ -68,10 +68,7 @@ class DEC(nn.Module):
 
         # freeze the weights of the trained encoder
         if freeze:
-            for param in self.final_encoder.parameters():
-                param.requires_grad = False
-
-            for param in self.final_decoder.parameters():
+            for param in list(encoder.parameters()) + list(decoder.parameters()):
                 param.requires_grad = False
 
         self.final_encoder.append(encoder)
