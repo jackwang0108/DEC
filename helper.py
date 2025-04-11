@@ -125,14 +125,5 @@ def get_freer_gpu():
     return np.argmin(memory_available)
 
 
-def calculate_accuracy(
-    y_true: torch.Tensor,
-    y_pred: torch.Tensor,
-) -> float:
-    assert len(y_true) == len(y_pred)
-    correct = (y_true == y_pred).sum().item()
-    return correct / len(y_true)
-
-
 if __name__ == "__main__":
     print(get_freer_gpu())

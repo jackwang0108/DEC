@@ -65,7 +65,6 @@ from helper import (
     get_logger,
     set_random_seed,
     get_freer_gpu,
-    calculate_accuracy,
 )
 from datasets import (
     get_datasets,
@@ -364,16 +363,10 @@ def target_distribution(
     return (pij / (pij.sum(dim=1, keepdim=True) + eps)).detach()
 
 
-def kl_div_loss(
-    y_true: torch.Tensor, y_pred: torch.Tensor, eps: float = 1e-8
-) -> torch.Tensor:
-    return (y_true * torch.log(y_true / (y_pred + eps) + eps)).sum(1).mean()
-
-
 @torch.no_grad()
-def relabelling(
+def calculate_accuracy(
     y_pred: torch.Tensor, y_true: torch.Tensor, num_classes: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
     # Sec.4.2: ... For all algorithms we set the number of clusters to the number of ground-truth categories and evaluate performance with unsupervised clustering accuracy (ACC) ...
     confusion_matrix: torch.Tensor = ConfusionMatrix(
         task="multiclass", num_classes=num_classes
@@ -381,45 +374,20 @@ def relabelling(
 
     confusion_matrix = confusion_matrix.cpu().numpy()
 
-    old_label, new_label = hungarian_optimal_assignments(
-        confusion_matrix.max() - confusion_matrix
-    )
+    clsuter_id, class_label = hungarian_optimal_assignments(-confusion_matrix)
 
     optimal_mapping = np.zeros(num_classes, dtype=np.int64)
-    optimal_mapping[old_label] = new_label
+    optimal_mapping[clsuter_id] = class_label
     optimal_mapping = torch.tensor(optimal_mapping, dtype=torch.long).to(device)
 
-    return optimal_mapping, optimal_mapping[y_pred]
+    acc = confusion_matrix[clsuter_id, class_label].sum() / len(y_pred)
 
-
-@torch.no_grad()
-def test_epoch(
-    dec: DEC, centroids: torch.Tensor, alpha: float, test_loader: DataLoader
-) -> float:
-    """Test the model on the test set"""
-    dec.eval()
-
-    image: torch.Tensor
-    preds: torch.Tensor
-    preds: list[torch.Tensor] = []
-    labels: list[torch.Tensor] = []
-    for _, image, label in test_loader:
-        feature = dec.final_encoder(image.to(device))
-        qij = soft_assignment(feature, centroids, alpha)
-
-        labels.append(label)
-        preds.append(qij.argmax(dim=1))
-
-    preds = torch.cat(preds, dim=0).to(device)
-    labels = torch.cat(labels, dim=0).to(device)
-
-    optimal_mapping, relabelled_preds = relabelling(preds, labels, centroids.shape[0])
-
-    acc = calculate_accuracy(y_true=labels, y_pred=relabelled_preds)
-
-    dec.train()
-
-    return acc, optimal_mapping
+    return (
+        optimal_mapping,
+        optimal_mapping[y_pred],
+        torch.from_numpy(confusion_matrix),
+        acc,
+    )
 
 
 def get_mapping_table_rich(mapping: torch.Tensor, cols_per_block: int = 10) -> str:
@@ -453,7 +421,6 @@ def parameter_optimization(
     dec: DEC,
     initial_centroids: torch.Tensor,
     train_loader: DataLoader,
-    test_loader: DataLoader,
     alpha: float = 1.0,
     total: int = 1,
     num_epoch: int = 200,
@@ -481,17 +448,20 @@ def parameter_optimization(
     )
 
     epoch = 0
-    previous_results = torch.ones(
+    previous_preds = torch.ones(
         len(train_loader.dataset), dtype=torch.long, device=device
     )
-    current_results = torch.zeros(
+    current_preds = torch.zeros(
+        len(train_loader.dataset), dtype=torch.long, device=device
+    )
+    ground_truth = torch.zeros(
         len(train_loader.dataset), dtype=torch.long, device=device
     )
 
     changed_ratio = 1
     while changed_ratio > total or epoch < num_epoch:
 
-        previous_results = current_results.clone()
+        previous_preds = current_preds.clone()
 
         total_loss = 0
 
@@ -515,7 +485,6 @@ def parameter_optimization(
 
             # https://www.zhihu.com/question/384982085/answer/3111848737
             loss = kl_divergence(torch.log(qij + 1e-10), pij)
-            # loss = kl_div_loss(y_pred=qij, y_true=pij)
 
             optimizer.zero_grad()
             loss.backward()
@@ -524,16 +493,18 @@ def parameter_optimization(
             total_loss += loss.item()
 
             # update the current results
-            current_results[idx] = qij.argmax(dim=1)
+            current_preds[idx] = qij.argmax(dim=1)
             # current_results[idx] = get_preds(qij=qij, centroids=centroids)
 
-        changed_ratio = (current_results != previous_results).sum() / len(
+            ground_truth[idx] = label
+
+        changed_ratio = (current_preds != previous_preds).sum() / len(
             train_loader.dataset
         )
 
-        # Testing
-        acc, optimal_mapping = test_epoch(
-            dec=dec, centroids=centroids, alpha=alpha, test_loader=test_loader
+        # calculate the accuracy
+        optimal_mapping, relabelled_preds, confusion_matrix, acc = calculate_accuracy(
+            y_pred=current_preds, y_true=ground_truth, num_classes=centroids.shape[0]
         )
 
         logger.info(
@@ -554,12 +525,6 @@ def parameter_optimization(
                 logger.info(f"\t\t\t{line}")
 
         epoch += 1
-
-
-def testing(
-    dec: DEC,
-) -> DEC:
-    pass
 
 
 def main(args: argparse.Namespace):
@@ -620,14 +585,10 @@ def main(args: argparse.Namespace):
         dec,
         centroids,
         train_loader,
-        test_loader,
         alpha=args.alpha,
         total=args.total,
         # num_epoch=args.num_epoch,
     )
-
-    # Step 3: Testing
-    testing(dec)
 
     return dec
 
