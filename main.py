@@ -549,18 +549,6 @@ def main(args: argparse.Namespace):
         ),
     )
 
-    test_set = get_datasets(args.dataset, split="test")
-    test_loader = DataLoader(
-        test_set,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=(
-            mnist_collate_fn
-            if args.dataset == "MNIST"
-            else (stl10_collate_fn if args.dataset == "STL-10" else reuters_collate_fn)
-        ),
-    )
-
     # Sec.3 Deep embedded clustering: ... . DEC has two phases: (1) parameter initialization with a deep autoencoder (Vincent et al., 2010) and (2) parameter optimization (i.e., clustering) ...
 
     dec = DEC()
