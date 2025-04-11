@@ -410,7 +410,7 @@ def get_mapping_table_rich(mapping: torch.Tensor, cols_per_block: int = 10) -> s
             table.add_column(str(col_idx), justify="center")
 
         table.add_row("Cluster ID", *[str(x) for x in original[i : i + cols_per_block]])
-        table.add_row("Class ID", *[str(x) for x in mapped[i : i + cols_per_block]])
+        table.add_row("Class Label", *[str(x) for x in mapped[i : i + cols_per_block]])
 
         console.print(table)
 
@@ -422,9 +422,10 @@ def parameter_optimization(
     initial_centroids: torch.Tensor,
     train_loader: DataLoader,
     alpha: float = 1.0,
-    total: int = 1,
+    total: int = 0.001,
     num_epoch: int = 200,
 ) -> DEC:
+    # sourcery skip: low-code-quality
     """Step 2: Parameter Optimization"""
     logger.warning("Step 2: Parameter Optimization")
 
@@ -507,22 +508,23 @@ def parameter_optimization(
             y_pred=current_preds, y_true=ground_truth, num_classes=centroids.shape[0]
         )
 
-        logger.info(
-            f"\t\tEpoch [{epoch}], "
-            f"Loss: {Fore.CYAN}{total_loss / len(train_loader):.5f}{Fore.RESET}, "
-            f"Testing Accuracy: {Fore.CYAN}{acc * 100:.2f}%{Fore.RESET}"
-            + (
-                ""
-                if epoch == 0
-                else f"{Fore.YELLOW} | {Fore.CYAN}{changed_ratio:.2f}%{Fore.RESET} of points changed"
+        if epoch % 10 == 0:
+            logger.info(
+                f"\t\tEpoch [{epoch:{{len(str(num_epoch))}}}], "
+                f"Loss: {Fore.CYAN}{total_loss / len(train_loader):.5f}{Fore.RESET}, "
+                f"Testing Accuracy: {Fore.CYAN}{acc * 100:.2f}%{Fore.RESET}"
+                + (
+                    ""
+                    if epoch == 0
+                    else f"{Fore.YELLOW} | {Fore.CYAN}{changed_ratio * 100:.2f}%{Fore.RESET} of points changed"
+                )
+                + f"{Fore.RESET}"
             )
-            + f"{Fore.RESET}"
-        )
 
-        if epoch % 5 == 0:
-            logger.info("\t\tCurrent Cluster-Class Mapping")
-            for line in str(get_mapping_table_rich(optimal_mapping)).split("\n"):
-                logger.info(f"\t\t\t{line}")
+            if epoch % 50 == 0:
+                logger.info("\t\tCurrent Cluster-Class Mapping")
+                for line in str(get_mapping_table_rich(optimal_mapping)).split("\n"):
+                    logger.info(f"\t\t\t{line}")
 
         epoch += 1
 
