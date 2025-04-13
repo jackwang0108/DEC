@@ -55,14 +55,14 @@ from networks.dec import (
     soft_assignment,
     target_distribution,
 )
-from helper import (
+from src.helper import (
     get_logger,
     set_random_seed,
     get_freer_gpu,
     get_mapping_table_rich,
     calculate_unsupervised_clustering_accuracy,
 )
-from datasets import (
+from src.datasets import (
     get_datasets,
     mnist_collate_fn,
     stl10_collate_fn,

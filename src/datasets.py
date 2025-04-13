@@ -90,7 +90,7 @@ class REUTERS(data.Dataset):
 def get_datasets(
     dataset: Literal["MNIST", "STL-10", "REUTERS"],
     split: Literal["train", "test"] = "train",
-    root_dir: Optional[Path] = Path(__file__).resolve().parent / "data",
+    root_dir: Optional[Path] = Path(__file__).resolve().parent.parent / "data",
 ) -> MNIST | STL10 | REUTERS:
     assert dataset in ["MNIST", "STL-10", "REUTERS"], f"dataset {dataset} not supported"
 
