@@ -48,7 +48,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # My Library
-from network import (
+from networks.dec import (
     DEC,
     get_args,
     get_centroids,
