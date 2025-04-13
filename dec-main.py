@@ -37,7 +37,6 @@ import argparse
 from pathlib import Path
 
 # Third-Party Library
-import numpy as np
 from colorama import Fore
 
 
