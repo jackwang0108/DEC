@@ -413,7 +413,7 @@ def main(args: argparse.Namespace):
         train_loader,
         alpha=args.alpha,
         total=args.total,
-        num_epoch=args.finetune_epochs,
+        num_epoch=args.optimization_epochs,
     )
 
     return dec
