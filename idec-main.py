@@ -7,6 +7,8 @@ IDEC (Improved Deep Embedded Clustering with Local Structure Preservation) 主�
     @IDE     : VsCode
 """
 
+# TODO: IDEC性能还有一些问题, 得看看问题出在哪了
+
 # Standard Library
 import datetime
 import argparse
