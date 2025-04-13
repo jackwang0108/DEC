@@ -510,7 +510,7 @@ def parameter_optimization(
 
         if epoch % 10 == 0:
             logger.info(
-                f"\t\tEpoch [{epoch:{{len(str(num_epoch))}}}], "
+                f"\t\tEpoch [{epoch:{len(str(num_epoch))}}], "
                 f"Loss: {Fore.CYAN}{total_loss / len(train_loader):.5f}{Fore.RESET}, "
                 f"Testing Accuracy: {Fore.CYAN}{acc * 100:.2f}%{Fore.RESET}"
                 + (
