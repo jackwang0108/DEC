@@ -243,7 +243,7 @@ def get_args() -> argparse.Namespace:
         "--alpha",
         type=float,
         default=1.0,
-        help="degrees of freedom of the Student’s t- distribution",
+        help="degrees of freedom of the Student’s t-distribution",
     )
     parser.add_argument(
         "--num_clusters",
