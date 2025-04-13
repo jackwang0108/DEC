@@ -3,7 +3,7 @@ network 定义了DEC网络结构以及与DEC相关的函数
 
     @Time    : 2025/02/26
     @Author  : JackWang
-    @File    : network.py
+    @File    : dec.py
     @IDE     : VsCode
 """
 

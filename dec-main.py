@@ -27,7 +27,7 @@ DEC一共就两步:
 
     @Time    : 2025/02/25
     @Author  : JackWang
-    @File    : main.py
+    @File    : dec-main.py
     @IDE     : VsCode
 """
 
