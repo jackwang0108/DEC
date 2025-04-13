@@ -34,22 +34,11 @@ DEC一共就两步:
 # Standard Library
 import datetime
 import argparse
-from io import StringIO
 from pathlib import Path
-from collections.abc import Callable
 
 # Third-Party Library
 import numpy as np
-from rich.table import Table
-from rich.console import Console
-from colorama import Fore, Style
-from kmeans_pytorch import kmeans
-from torchmetrics import ConfusionMatrix
-from scipy.optimize import linear_sum_assignment
-
-hungarian_optimal_assignments: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] = (
-    linear_sum_assignment
-)
+from colorama import Fore
 
 
 # Torch Library
@@ -59,12 +48,19 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # My Library
-from network import DEC
-from helper import (
+from network import (
+    DEC,
     get_args,
+    get_centroids,
+    soft_assignment,
+    target_distribution,
+)
+from helper import (
     get_logger,
     set_random_seed,
     get_freer_gpu,
+    get_mapping_table_rich,
+    calculate_unsupervised_clustering_accuracy,
 )
 from datasets import (
     get_datasets,
@@ -120,32 +116,11 @@ def sae_train_one_layer(
     return dec
 
 
-def sae_remove_dropout(
-    dec: DEC,
-) -> DEC:
-    for name, parent_module in list(dec.final_encoder.named_children()) + list(
-        dec.final_decoder.named_children()
-    ):
-        if isinstance(parent_module, nn.Sequential):
-            for name, module in list(parent_module.named_children()):
-                if isinstance(module, nn.Dropout):
-                    parent_module._modules[name] = nn.Identity()
-
-    dec.final_encoder.train()
-    dec.final_decoder.train()
-    for param in list(dec.final_encoder.parameters()) + list(
-        dec.final_decoder.parameters()
-    ):
-        param.requires_grad = True
-
-    return dec
-
-
 def sae_final_finetune(dec: DEC, train_loader: DataLoader, num_epoch: int = 470) -> DEC:
 
     # Sec.4.3 ... The entire deep autoencoder is further finetuned for 100000 iterations without dropout ...
     logger.info(f"\t\tRemoving dropout layers from the entire autoencoder")
-    dec = sae_remove_dropout(dec)
+    dec = dec.remove_dropout()
 
     loss_func = nn.MSELoss()
     optimizer = optim.SGD(
@@ -180,27 +155,6 @@ def sae_final_finetune(dec: DEC, train_loader: DataLoader, num_epoch: int = 470)
             )
 
     return dec
-
-
-@torch.no_grad()
-def dec_get_centroids(
-    dec: DEC, train_loader: DataLoader, num_clusters: int
-) -> torch.Tensor:
-
-    features = []
-    for _, image, _ in train_loader:
-        image = image.to(device)
-        features.append(dec.final_encoder(image))
-    features = torch.cat(features, dim=0)
-
-    _, cluster_centers = kmeans(
-        X=features,
-        num_clusters=num_clusters,
-        distance="euclidean",
-        device=torch.device("cuda:0"),
-    )
-
-    return cluster_centers
 
 
 def parameter_initialization(
@@ -256,7 +210,7 @@ def parameter_initialization(
 
     if pretrained_weights is not None:
         saved_data = torch.load(pretrained_weights, map_location=device)
-        dec = sae_remove_dropout(dec)
+        dec = dec.remove_dropout()
         dec.load_state_dict(saved_data["model"])
         for param in dec.parameters():
             param.requires_grad = True
@@ -272,7 +226,7 @@ def parameter_initialization(
         f"\t{Fore.MAGENTA}[3] DEC initializing initial centroids: k={num_clusters}{Fore.RESET}"
     )
 
-    centroids = dec_get_centroids(dec, train_loader, num_clusters)
+    centroids = get_centroids(dec, train_loader, num_clusters)
 
     # save the pretrained weights if requested
     if save_path is not None:
@@ -295,126 +249,6 @@ def parameter_initialization(
         )
 
     return (dec, centroids)
-
-
-def soft_assignment(
-    feature: torch.Tensor, centroids: torch.Tensor, alpha: float = 1.0
-) -> torch.Tensor:
-    """
-    在分类任务中, 我们常说的是分类这个词 (classification), 即将一个样本划分到某一个类中
-
-    但是对于聚类任务, 我们更关心的是样本和聚类中心 (即簇), 因此我们更常说的是分配 (assignment) 这个词, 即将一个样本分配到某一个簇中
-
-    传统聚类（如K-means）中，每个样本会被**硬分配（hard assignment）**到唯一的簇, 即:
-            z_i = argmin_k ||x_i − μ_k ||**2
-    因为是argmin操作, 所以每个样本只能属于一个簇
-
-    但是在DEC中, 我们使用的是**软分配（soft assignment）**. 所谓软分配的含义, 就是使用相似度/概率来描述样本属于的簇, 此时针对一个样本, 就可以得到一个相似度向量, 进行归一化操作之后, 使得和为1之后, 即可视为概率向量
-    """
-    distribution = ((feature.unsqueeze(dim=1) - centroids.unsqueeze(dim=0)) ** 2).sum(
-        dim=2
-    )
-
-    qij = (1 + distribution / alpha) ** (-(alpha + 1) / 2)
-
-    return qij / qij.sum(dim=1, keepdim=True)
-
-
-def target_distribution(
-    qij: torch.Tensor,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """
-    DEC的基础是流型假设
-
-    流型假设 (数学的讲)
-        1. 数据观测维度 ≠ 真实维度：
-            例如人脸图片（像素维度=3072 for 32x32x3）
-            实际可能由**光照、姿态、表情等少量参数（~10维）**控制
-        2. 流形假设（Manifold Hypothesis）：
-            真实数据通常**集中**在嵌入高维空间的低维流形上
-
-    换人话来说, 流型其实就是特征. 因此用计算机的话来解释流形学习就是:
-        1. 数据观测维度 ≠ 真实维度
-            数据观测维度信息密度太低了, 并且存在很多噪声
-        2. 流形假设（Manifold Hypothesis）:
-            特征在纯净的特征空间中是集中分布的
-
-    对于DEC而言, 他就是用一个AutoEncoder来学习一个低维的流形 (特征)
-
-    在此基础上, DEC的核心先验知识是: **初始的高置信度的聚类结果大部分都是对的**
-
-    什么意思?
-
-    我们现在通过SAE训练好的AutoEncoder提取到的特征已经足够好了, 使得KMeans聚类得到的结果已经蛮不错了, 我们在Optimization时候需要继续优化.
-
-    例如, 对于一个给定的样本, 计算出来的qij中如果有一个值是0.7, 其他值加起来是0.3, 那么我们有充足的理由相信, 这个样本就是属于0.7这个簇的
-
-    所以, 我们在优化阶段需要做的, 就是让qij的尖顶更加突出, 其余地方更加平缓
-    """
-
-    # qij 可以理解为概率分布, 代表了每个样本属于每个簇的概率
-    # 对所有样本求和后得到的 fj 则描述了簇中的样本数量
-    fj = qij.sum(dim=0, keepdim=True) + eps
-
-    # 然后去除一下频率的影响, 本质上是考虑了类别不均衡, 但是很粗糙
-    pij = (qij**2 + eps) / fj
-
-    return (pij / (pij.sum(dim=1, keepdim=True) + eps)).detach()
-
-
-@torch.no_grad()
-def calculate_accuracy(
-    y_pred: torch.Tensor, y_true: torch.Tensor, num_classes: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
-    # Sec.4.2: ... For all algorithms we set the number of clusters to the number of ground-truth categories and evaluate performance with unsupervised clustering accuracy (ACC) ...
-    confusion_matrix: torch.Tensor = ConfusionMatrix(
-        task="multiclass", num_classes=num_classes
-    ).to(device)(y_pred, y_true)
-
-    confusion_matrix = confusion_matrix.cpu().numpy()
-
-    clsuter_id, class_label = hungarian_optimal_assignments(-confusion_matrix)
-
-    optimal_mapping = np.zeros(num_classes, dtype=np.int64)
-    optimal_mapping[clsuter_id] = class_label
-    optimal_mapping = torch.tensor(optimal_mapping, dtype=torch.long).to(device)
-
-    acc = confusion_matrix[clsuter_id, class_label].sum() / len(y_pred)
-
-    return (
-        optimal_mapping,
-        optimal_mapping[y_pred],
-        torch.from_numpy(confusion_matrix),
-        acc,
-    )
-
-
-def get_mapping_table_rich(mapping: torch.Tensor, cols_per_block: int = 10) -> str:
-    console = Console(file=StringIO(), force_terminal=False)
-    original = range(len(mapping))
-    mapped = mapping.cpu().numpy()
-
-    for i in range(0, len(mapping), cols_per_block):
-        table = Table(
-            title=(
-                f"Block {i//cols_per_block + 1}"
-                if len(mapping) > cols_per_block
-                else ""
-            ),
-            show_header=True,
-        )
-        table.add_column("No.", justify="center")
-
-        for col_idx in range(i, min(i + cols_per_block, len(mapping))):
-            table.add_column(str(col_idx), justify="center")
-
-        table.add_row("Cluster ID", *[str(x) for x in original[i : i + cols_per_block]])
-        table.add_row("Class Label", *[str(x) for x in mapped[i : i + cols_per_block]])
-
-        console.print(table)
-
-    return console.file.getvalue()
 
 
 def parameter_optimization(
@@ -503,9 +337,13 @@ def parameter_optimization(
             train_loader.dataset
         )
 
-        # calculate the accuracy
-        optimal_mapping, relabelled_preds, confusion_matrix, acc = calculate_accuracy(
-            y_pred=current_preds, y_true=ground_truth, num_classes=centroids.shape[0]
+        # Sec.4.2: ... For all algorithms we set the number of clusters to the number of ground-truth categories and evaluate performance with unsupervised clustering accuracy (ACC) ...
+        optimal_mapping, relabelled_preds, confusion_matrix, acc = (
+            calculate_unsupervised_clustering_accuracy(
+                y_pred=current_preds,
+                y_true=ground_truth,
+                num_classes=centroids.shape[0],
+            )
         )
 
         if epoch % 10 == 0:
@@ -577,7 +415,7 @@ def main(args: argparse.Namespace):
         train_loader,
         alpha=args.alpha,
         total=args.total,
-        # num_epoch=args.num_epoch,
+        num_epoch=args.finetune_epochs,
     )
 
     return dec
