@@ -328,7 +328,6 @@ def parameter_optimization(
 
             # update the current results
             current_preds[idx] = qij.argmax(dim=1)
-            # current_results[idx] = get_preds(qij=qij, centroids=centroids)
 
             ground_truth[idx] = label
 
